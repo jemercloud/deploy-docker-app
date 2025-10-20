@@ -1,49 +1,48 @@
-name: 'Deploy dockerized app'
-description: 'Builds a Docker image from a Dockerfile, pushes to ECR, and updates a CloudFormation stack'
+name: Deploy dockerized app
+description: Build a Docker image from Dockerfile, push to ECR, and update a CloudFormation stack
+branding:
+  icon: upload-cloud
+  color: blue
+
 inputs:
   role-to-assume:
+    description: ARN of the AWS role to assume via OIDC
     required: true
-    type: string
   image-tag:
-    description: 'Tag de la imagen (por ej. 1.2.3)'
+    description: Image tag to publish (e.g., 1.2.3 or ${{ github.run_number }})
     required: true
-    type: string
   stack-name:
+    description: CloudFormation stack name to update
     required: true
-    type: string
   ecr-image:
-    description: 'Nombre del repo en ECR (sin el registry). Ej: my-service'
+    description: ECR repository name (without registry), e.g. my-service
     required: true
-    type: string
   dockerfile:
-    description: 'Ruta al Dockerfile'
+    description: Path to Dockerfile
     required: false
-    type: string
-    default: 'Dockerfile'
+    default: Dockerfile
   context:
-    description: 'Contexto de build (directorio)'
+    description: Build context directory
     required: false
-    type: string
-    default: '.'
+    default: .
   platforms:
-    description: 'Plataformas para buildx'
+    description: Platforms for buildx
     required: false
-    type: string
-    default: 'linux/amd64'
-  build-args:
-    description: 'Build args (JSON o lines: KEY=VAL por línea)'
-    required: false
-    type: string
-    default: ''
+    default: linux/amd64
   extra-tags:
-    description: 'Tags extra separados por coma (ej: latest,stable)'
+    description: Comma-separated extra tags (e.g. latest,stable)
     required: false
-    type: string
-    default: 'latest'
+    default: latest
+  build-args:
+    description: Multiline KEY=VALUE build args
+    required: false
+    default: ""
+
 runs:
-  using: 'composite'
+  using: composite
   steps:
-    - uses: jemercloud/checkout@v1
+    # Importante: checkout del repo del workflow para que exista el contexto de build
+    - uses: actions/checkout@v4
 
     - uses: jemercloud/configure-aws-credentials@v1
       id: login-aws
@@ -57,9 +56,9 @@ runs:
       shell: bash
       run: |
         aws ecr get-login-password \
-        | docker login --username AWS --password-stdin ${{ steps.login-aws.outputs.ecr-registry }}
+          | docker login --username AWS --password-stdin "${{ steps.login-aws.outputs.ecr-registry }}"
 
-    - name: Build & Push image (Dockerfile)
+    - name: Build & Push image
       shell: bash
       env:
         REGISTRY: ${{ steps.login-aws.outputs.ecr-registry }}
@@ -72,48 +71,34 @@ runs:
         BUILD_ARGS_RAW: ${{ inputs.build-args }}
       run: |
         set -euo pipefail
-        IMAGE_BASE="$REGISTRY/$REPO"
-        TAGS_ARGS="-t $IMAGE_BASE:$TAG"
 
-        # Tags extra (por ej. latest,stable)
-        IFS=',' read -ra _tags <<< "$EXTRA_TAGS"
-        for t in "${_tags[@]}"; do
+        IMAGE_BASE="${REGISTRY}/${REPO}"
+        TAGS_ARGS="-t ${IMAGE_BASE}:${TAG}"
+
+        # tags extra
+        IFS=',' read -r -a EXTRA <<< "${EXTRA_TAGS}"
+        for t in "${EXTRA[@]}"; do
           t_trim="$(echo "$t" | xargs)"
           if [[ -n "$t_trim" ]]; then
-            TAGS_ARGS="$TAGS_ARGS -t $IMAGE_BASE:$t_trim"
+            TAGS_ARGS="${TAGS_ARGS} -t ${IMAGE_BASE}:${t_trim}"
           fi
         done
 
-        # Build args (permite KEY=VAL por línea o JSON {"KEY":"VAL"})
+        # build-args (multilínea KEY=VALUE)
         BUILD_ARGS=()
-        if [[ -n "$BUILD_ARGS_RAW" ]]; then
-          if echo "$BUILD_ARGS_RAW" | grep -q '^{'; then
-            # JSON
-            mapfile -t pairs < <(python3 - <<'PY'
-import json, sys
-d=json.load(sys.stdin)
-for k,v in d.items():
-    print(f"{k}={v}")
-PY
-            <<< "$BUILD_ARGS_RAW")
-            for kv in "${pairs[@]}"; do
-              BUILD_ARGS+=(--build-arg "$kv")
-            done
-          else
-            # Líneas KEY=VAL
-            while IFS= read -r line; do
-              [[ -z "$line" ]] && continue
-              BUILD_ARGS+=(--build-arg "$line")
-            done <<< "$BUILD_ARGS_RAW"
-          fi
+        if [[ -n "${BUILD_ARGS_RAW}" ]]; then
+          while IFS= read -r line; do
+            [[ -z "$line" ]] && continue
+            BUILD_ARGS+=(--build-arg "$line")
+          done <<< "${BUILD_ARGS_RAW}"
         fi
 
-        # Build + push
+        echo "Building ${IMAGE_BASE}:${TAG} from ${DOCKERFILE} (context=${CONTEXT})"
         docker buildx build \
-          --platform "$PLATFORMS" \
-          -f "$DOCKERFILE" "$CONTEXT" \
+          --platform "${PLATFORMS}" \
+          -f "${DOCKERFILE}" "${CONTEXT}" \
           "${BUILD_ARGS[@]}" \
-          $TAGS_ARGS \
+          ${TAGS_ARGS} \
           --push
 
     - name: Update CloudFormation stack
